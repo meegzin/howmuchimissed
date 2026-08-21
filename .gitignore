@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+server/data/
+server/server/data/
+tmp/
+coverage/
+.env
+*.log
