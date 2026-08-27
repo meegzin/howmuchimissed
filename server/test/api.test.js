@@ -2,14 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/db.js';
 import { createApp } from '../src/app.js';
+import { createSqliteRepository } from '../src/repositories/sqlite.js';
 
 async function setup() {
-  const db = createDatabase(':memory:'); const server = createApp(db, () => '2026-08-01').listen(0);
+  const db = createDatabase(':memory:'); const repository = createSqliteRepository(db);
+  const server = createApp({ repositoryFor: () => repository, authenticate: async token => token === 'test-token' ? { user: { id: 'test-user', email: 'test@example.com', app_metadata: {} }, issuedAt: Math.floor(Date.now() / 1000) } : null, localMode: true }).listen(0);
   const base = `http://127.0.0.1:${server.address().port}`;
-  const call = async (path, options = {}) => { const res = await fetch(base + path, { headers: { 'content-type': 'application/json' }, ...options }); return { status: res.status, data: res.status === 204 ? null : await res.json() }; };
+  const call = async (path, options = {}) => { const res = await fetch(base + path, { headers: { 'content-type': 'application/json', authorization: 'Bearer test-token' }, ...options }); return { status: res.status, data: res.status === 204 ? null : await res.json() }; };
   await call('/api/semester', { method: 'PUT', body: JSON.stringify({ startDate: '2026-08-01' }) });
   return { db, server, call };
 }
+test('protege endpoints acadêmicos e mantém health check público', async t => {
+  const db = createDatabase(':memory:'); const repository = createSqliteRepository(db);
+  const server = createApp({ repositoryFor: () => repository, authenticate: async () => null, localMode: true }).listen(0);
+  t.after(() => { server.close(); db.close(); }); const base = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(`${base}/api/health`)).status, 200);
+  const response = await fetch(`${base}/api/classes`); assert.equal(response.status, 401); assert.equal((await response.json()).code, 'AUTH_REQUIRED');
+});
+test('exige troca da senha temporária antes de liberar os dados', async t => {
+  const db = createDatabase(':memory:'); const repository = createSqliteRepository(db); let changed = false;
+  const server = createApp({ repositoryFor: () => repository, authenticate: async () => ({ user: { id: 'new-user', email: 'new@example.com', app_metadata: { must_change_password: true } }, issuedAt: Math.floor(Date.now() / 1000) }), accountAdmin: { async markPasswordChanged() { changed = true; } }, localMode: true }).listen(0);
+  t.after(() => { server.close(); db.close(); }); const base = `http://127.0.0.1:${server.address().port}`; const headers = { authorization: 'Bearer temporary' };
+  const blocked = await fetch(`${base}/api/classes`, { headers }); assert.equal(blocked.status, 403); assert.equal((await blocked.json()).code, 'PASSWORD_CHANGE_REQUIRED');
+  assert.equal((await fetch(`${base}/api/account/password-changed`, { method: 'POST', headers })).status, 204); assert.equal(changed, true);
+});
 test('CRUD, duplicidade, conflito e cascata', async t => {
   const { db, server, call } = await setup(); t.after(() => { server.close(); db.close(); });
   const created = await call('/api/classes', { method: 'POST', body: JSON.stringify({ name: 'Cálculo', totalMinutes: 1200, meetingMinutes: 100, weekdays: [1], startTime: '08:00' }) });

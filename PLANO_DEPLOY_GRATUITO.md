@@ -1,5 +1,7 @@
 # Plano para lançamento gratuito do MVP
 
+> Implementação preparada em 27 de agosto de 2026. O repositório agora contém schema PostgreSQL com RLS, autenticação privada, scripts operacionais, CI e Blueprint do Render. A criação dos serviços e a migração efetiva aguardam as credenciais dos provedores.
+
 > Documento de continuidade criado em 21 de agosto de 2026. Planos, limites e preços de provedores mudam com frequência; confirme as condições oficiais antes do lançamento.
 
 ## Resumo

@@ -1,23 +1,14 @@
 import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
 import multer from 'multer';
 import { calculateSummary, generateScheduledDatesByCount, isIsoDate } from './domain.js';
 import { inspectTimetablePdf } from './pdf-import.js';
 
 const error = (res, status, code, message, fields) => res.status(status).json({ code, message, ...(fields && { fields }) });
-const rowToClass = row => row && ({ id: row.id, name: row.name, totalMinutes: row.total_minutes, meetingMinutes: row.meeting_minutes, weekdays: JSON.parse(row.weekdays), startTime: row.start_time });
-const semesterFrom = db => db.prepare('SELECT start_date AS startDate FROM semester WHERE id = 1').get() || null;
-const schedulesFrom = (db, id) => db.prepare('SELECT weekday, start_time AS startTime FROM class_schedules WHERE class_id = ? ORDER BY weekday, start_time').all(id);
-const withSchedules = (db, subject) => subject && ({ ...subject, schedules: schedulesFrom(db, subject.id) });
-const classFrom = (db, id) => withSchedules(db, rowToClass(db.prepare('SELECT * FROM classes WHERE id = ?').get(id)));
-const datesFrom = (db, table, id) => db.prepare(`SELECT date FROM ${table} WHERE class_id = ? ORDER BY date`).all(id).map(row => row.date);
-const exclusionRowsFrom = (db, id) => db.prepare('SELECT date, reinstated FROM exclusions WHERE class_id = ? ORDER BY date').all(id).map(row => ({ date: row.date, reinstated: Boolean(row.reinstated) }));
-
-function validateSemester(body) {
-  const fields = {};
-  if (!isIsoDate(body.startDate)) fields.startDate = 'Informe uma data inicial válida.';
-  return fields;
-}
-
+const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+function validateSemester(body) { const fields = {}; if (!isIsoDate(body.startDate)) fields.startDate = 'Informe uma data inicial válida.'; return fields; }
 function validateClass(body) {
   const fields = {};
   if (!body.name?.trim()) fields.name = 'Informe o nome da disciplina.';
@@ -31,177 +22,138 @@ function validateClass(body) {
   if (new Set(schedules.map(item => item.weekday)).size !== schedules.length) fields.weekdays = 'Cadastre no máximo um encontro por dia da semana.';
   return fields;
 }
+const normalizedSchedules = body => body.schedules || body.weekdays.map(weekday => ({ weekday, startTime: body.startTime }));
+const normalizedClass = body => ({ name: body.name.trim(), totalMinutes: body.totalMinutes, meetingMinutes: body.meetingMinutes, schedules: normalizedSchedules(body) });
 
-function normalizedSchedules(body) {
-  return body.schedules || body.weekdays.map(weekday => ({ weekday, startTime: body.startTime }));
-}
-
-export function createApp(db) {
+export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOrigins = [], localMode = false }) {
   const app = express();
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
-  app.use(express.json());
+  let ocrBusy = false;
+  app.set('trust proxy', 1);
+  app.use(helmet({ crossOriginResourcePolicy: false }));
+  app.use(cors({ origin(origin, callback) { callback(null, !origin || localMode || allowedOrigins.includes(origin)); } }));
+  app.use(express.json({ limit: '256kb' }));
+  app.use((req, res, next) => { req.requestId = crypto.randomUUID(); res.setHeader('X-Request-Id', req.requestId); next(); });
+  app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: 'draft-8', legacyHeaders: false }));
 
-  const details = subject => {
-    const semester = semesterFrom(db);
-    const exclusionRows = exclusionRowsFrom(db, subject.id);
+  app.get('/api/health', asyncRoute(async (_req, res) => { if (accountAdmin?.health) await accountAdmin.health(); res.json({ status: 'ok' }); }));
+  app.use('/api', asyncRoute(async (req, res, next) => {
+    const header = req.get('authorization') || ''; const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const auth = await authenticate(token);
+    if (!auth) return error(res, 401, 'AUTH_REQUIRED', 'Entre na sua conta para continuar.');
+    req.auth = auth; req.repository = repositoryFor(token, auth.user);
+    if (auth.user.app_metadata?.must_change_password && req.path !== '/account/password-changed') return error(res, 403, 'PASSWORD_CHANGE_REQUIRED', 'Troque a senha temporária antes de continuar.');
+    next();
+  }));
+
+  const details = async (repository, subject) => {
+    const semester = await repository.getSemester();
+    const [exclusionRows, absences] = await Promise.all([repository.getExclusions(subject.id), repository.getAbsences(subject.id)]);
     const exclusions = exclusionRows.filter(item => !item.reinstated).map(item => item.date);
     const reinstated = exclusionRows.filter(item => item.reinstated).map(item => item.date);
-    const absences = datesFrom(db, 'absences', subject.id);
     const totalMeetings = Math.floor(subject.totalMinutes / subject.meetingMinutes);
     const dates = semester ? generateScheduledDatesByCount(semester.startDate, subject.schedules, totalMeetings) : [];
     return { ...subject, exclusions, reinstated, absences, sessionCount: dates.length, ...calculateSummary({ totalMinutes: subject.totalMinutes, meetingMinutes: subject.meetingMinutes, absenceCount: absences.length }) };
   };
 
-  app.get('/api/semester', (_req, res) => res.json(semesterFrom(db)));
-  app.put('/api/semester', (req, res) => {
-    const fields = validateSemester(req.body);
-    if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise as datas do semestre.', fields);
-    const classes = db.prepare('SELECT * FROM classes').all().map(rowToClass).map(subject => withSchedules(db, subject));
-    for (const subject of classes) {
-      const count = Math.floor(subject.totalMinutes / subject.meetingMinutes);
-      const valid = new Set(generateScheduledDatesByCount(req.body.startDate, subject.schedules, count));
-      const history = [...datesFrom(db, 'absences', subject.id), ...datesFrom(db, 'exclusions', subject.id)];
+  app.post('/api/account/password-changed', asyncRoute(async (req, res) => { await accountAdmin?.markPasswordChanged(req.auth.user.id); res.status(204).end(); }));
+  app.get('/api/account/export', asyncRoute(async (req, res) => res.json({ schemaVersion: 1, exportedAt: new Date().toISOString(), account: { id: req.auth.user.id, email: req.auth.user.email }, ...(await req.repository.exportData()) })));
+  app.delete('/api/account', asyncRoute(async (req, res) => {
+    if (req.body?.confirmation !== 'EXCLUIR') return error(res, 400, 'CONFIRMATION_REQUIRED', 'Digite EXCLUIR para confirmar.');
+    if (!req.auth.issuedAt || Date.now() / 1000 - req.auth.issuedAt > 300) return error(res, 403, 'RECENT_LOGIN_REQUIRED', 'Entre novamente antes de excluir a conta.');
+    if (!accountAdmin?.deleteUser) return error(res, 501, 'NOT_AVAILABLE', 'Exclusão de conta indisponível neste ambiente.');
+    await accountAdmin.deleteUser(req.auth.user.id); res.status(204).end();
+  }));
+
+  app.get('/api/semester', asyncRoute(async (req, res) => res.json(await req.repository.getSemester())));
+  app.put('/api/semester', asyncRoute(async (req, res) => {
+    const fields = validateSemester(req.body); if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise as datas do semestre.', fields);
+    for (const subject of await req.repository.listClasses()) {
+      const valid = new Set(generateScheduledDatesByCount(req.body.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes)));
+      const history = [...await req.repository.getAbsences(subject.id), ...(await req.repository.getExclusions(subject.id)).map(item => item.date)];
       if (history.some(date => !valid.has(date))) return error(res, 409, 'SESSION_CONFLICT', 'A alteração invalidaria uma aula com histórico. Remova o registro antes de alterar o início.');
     }
-    db.prepare('INSERT INTO semester (id,start_date) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET start_date=excluded.start_date').run(req.body.startDate);
-    res.json(semesterFrom(db));
-  });
-
-  app.get('/api/sessions', (req, res) => {
-    const { from, to } = req.query;
-    if (!isIsoDate(from) || !isIsoDate(to) || from > to) return error(res, 400, 'INVALID_RANGE', 'Informe um intervalo de datas válido.');
-    const semester = semesterFrom(db);
-    if (!semester) return res.json([]);
-    const subjects = db.prepare('SELECT * FROM classes ORDER BY name').all().map(rowToClass).map(subject => withSchedules(db, subject));
-    const sessions = [];
-    for (const subject of subjects) {
-      const summary = details(subject);
-      const exclusions = new Map(exclusionRowsFrom(db, subject.id).map(item => [item.date, item]));
-      const absences = new Set(summary.absences);
-      const dates = generateScheduledDatesByCount(semester.startDate, subject.schedules, summary.totalMeetings).filter(date => date >= from && date <= to);
-      for (const date of dates) {
-        const exclusion = exclusions.get(date);
-        const schedule = subject.schedules.find(item => item.weekday === new Date(`${date}T00:00:00Z`).getUTCDay());
-        sessions.push({
-          date, classId: subject.id, name: subject.name, startTime: schedule?.startTime,
-          meetingMinutes: subject.meetingMinutes, missed: absences.has(date),
-          excluded: Boolean(exclusion && !exclusion.reinstated), reinstated: Boolean(exclusion?.reinstated),
-          absenceCount: summary.absenceCount, maxAbsences: summary.maxAbsences, status: summary.status
-        });
+    res.json(await req.repository.setSemester(req.body.startDate));
+  }));
+  app.get('/api/sessions', asyncRoute(async (req, res) => {
+    const { from, to } = req.query; if (!isIsoDate(from) || !isIsoDate(to) || from > to) return error(res, 400, 'INVALID_RANGE', 'Informe um intervalo de datas válido.');
+    const semester = await req.repository.getSemester(); if (!semester) return res.json([]); const sessions = [];
+    for (const subject of await req.repository.listClasses()) {
+      const summary = await details(req.repository, subject); const exclusions = new Map((await req.repository.getExclusions(subject.id)).map(item => [item.date, item])); const absences = new Set(summary.absences);
+      for (const date of generateScheduledDatesByCount(semester.startDate, subject.schedules, summary.totalMeetings).filter(date => date >= from && date <= to)) {
+        const exclusion = exclusions.get(date); const schedule = subject.schedules.find(item => item.weekday === new Date(`${date}T00:00:00Z`).getUTCDay());
+        sessions.push({ date, classId: subject.id, name: subject.name, startTime: schedule?.startTime, meetingMinutes: subject.meetingMinutes, missed: absences.has(date), excluded: Boolean(exclusion && !exclusion.reinstated), reinstated: Boolean(exclusion?.reinstated), absenceCount: summary.absenceCount, maxAbsences: summary.maxAbsences, status: summary.status });
       }
     }
-    sessions.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name));
-    res.json(sessions);
-  });
-
-  app.get('/api/classes', (_req, res) => res.json(db.prepare('SELECT * FROM classes ORDER BY name').all().map(rowToClass).map(subject => withSchedules(db, subject)).map(details)));
-  app.get('/api/classes/:id', (req, res) => { const item = classFrom(db, req.params.id); return item ? res.json(details(item)) : error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.'); });
-  app.post('/api/classes', (req, res) => {
-    if (!semesterFrom(db)) return error(res, 409, 'SEMESTER_REQUIRED', 'Configure o semestre antes de criar disciplinas.');
-    const fields = validateClass(req.body);
-    if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados da disciplina.', fields);
-    const schedules = normalizedSchedules(req.body);
-    const weekdays = [...new Set(schedules.map(item => item.weekday))].sort();
-    const result = db.prepare('INSERT INTO classes (name,total_minutes,meeting_minutes,weekdays,start_time) VALUES (?,?,?,?,?)').run(req.body.name.trim(), req.body.totalMinutes, req.body.meetingMinutes, JSON.stringify(weekdays), schedules[0].startTime);
-    const insertSchedule = db.prepare('INSERT INTO class_schedules (class_id,weekday,start_time) VALUES (?,?,?)');
-    for (const item of schedules) insertSchedule.run(result.lastInsertRowid, item.weekday, item.startTime);
-    res.status(201).json(details(classFrom(db, result.lastInsertRowid)));
-  });
-  app.patch('/api/classes/:id', (req, res) => {
-    const current = classFrom(db, req.params.id);
-    if (!current) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    const next = { ...current, ...req.body, id: current.id };
-    if (!req.body.schedules && (req.body.weekdays || req.body.startTime)) {
-      next.schedules = (req.body.weekdays || current.weekdays).map(weekday => ({ weekday, startTime: req.body.startTime || current.startTime }));
-    }
-    const fields = validateClass(next);
-    if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados da disciplina.', fields);
-    const semester = semesterFrom(db);
-    const schedules = normalizedSchedules(next);
-    const count = Math.floor(next.totalMinutes / next.meetingMinutes);
-    const valid = new Set(generateScheduledDatesByCount(semester.startDate, schedules, count));
-    const history = [...datesFrom(db, 'absences', current.id), ...datesFrom(db, 'exclusions', current.id)];
+    sessions.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name)); res.json(sessions);
+  }));
+  app.get('/api/classes', asyncRoute(async (req, res) => res.json(await Promise.all((await req.repository.listClasses()).map(subject => details(req.repository, subject))))));
+  app.get('/api/classes/:id', asyncRoute(async (req, res) => { const item = await req.repository.getClass(req.params.id); return item ? res.json(await details(req.repository, item)) : error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.'); }));
+  app.post('/api/classes', asyncRoute(async (req, res) => {
+    if (!await req.repository.getSemester()) return error(res, 409, 'SEMESTER_REQUIRED', 'Configure o semestre antes de criar disciplinas.');
+    const fields = validateClass(req.body); if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados da disciplina.', fields);
+    res.status(201).json(await details(req.repository, await req.repository.createClass(normalizedClass(req.body))));
+  }));
+  app.patch('/api/classes/:id', asyncRoute(async (req, res) => {
+    const current = await req.repository.getClass(req.params.id); if (!current) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.'); const next = { ...current, ...req.body, id: current.id };
+    if (!req.body.schedules && (req.body.weekdays || req.body.startTime)) next.schedules = (req.body.weekdays || current.weekdays).map(weekday => ({ weekday, startTime: req.body.startTime || current.startTime }));
+    const fields = validateClass(next); if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados da disciplina.', fields);
+    const semester = await req.repository.getSemester(); const schedules = normalizedSchedules(next); const valid = new Set(generateScheduledDatesByCount(semester.startDate, schedules, Math.floor(next.totalMinutes / next.meetingMinutes)));
+    const history = [...await req.repository.getAbsences(current.id), ...(await req.repository.getExclusions(current.id)).map(item => item.date)];
     if (history.some(date => !valid.has(date))) return error(res, 409, 'SESSION_CONFLICT', 'A alteração invalidaria uma aula com histórico. Remova o registro antes de editar a disciplina.');
-    const weekdays = [...new Set(schedules.map(item => item.weekday))].sort();
-    db.prepare('UPDATE classes SET name=?,total_minutes=?,meeting_minutes=?,weekdays=?,start_time=? WHERE id=?').run(next.name.trim(), next.totalMinutes, next.meetingMinutes, JSON.stringify(weekdays), schedules[0].startTime, current.id);
-    db.prepare('DELETE FROM class_schedules WHERE class_id=?').run(current.id);
-    const insertSchedule = db.prepare('INSERT INTO class_schedules (class_id,weekday,start_time) VALUES (?,?,?)');
-    for (const item of schedules) insertSchedule.run(current.id, item.weekday, item.startTime);
-    res.json(details(classFrom(db, current.id)));
-  });
-  app.delete('/api/classes/:id', (req, res) => { const result = db.prepare('DELETE FROM classes WHERE id=?').run(req.params.id); return result.changes ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.'); });
+    res.json(await details(req.repository, await req.repository.updateClass(current.id, normalizedClass(next))));
+  }));
+  app.delete('/api/classes/:id', asyncRoute(async (req, res) => await req.repository.deleteClass(req.params.id) ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.')));
 
-  app.post('/api/imports/pdf', upload.single('file'), async (req, res) => {
+  const ocrLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 3, keyGenerator: req => req.auth.user.id, standardHeaders: 'draft-8', legacyHeaders: false });
+  app.post('/api/imports/pdf', ocrLimit, upload.single('file'), asyncRoute(async (req, res) => {
     if (!req.file) return error(res, 400, 'FILE_REQUIRED', 'Selecione um arquivo PDF.');
-    if (req.file.mimetype !== 'application/pdf' && !req.file.originalname.toLowerCase().endsWith('.pdf')) return error(res, 400, 'INVALID_FILE', 'Envie um arquivo no formato PDF.');
-    try { res.json(await inspectTimetablePdf(req.file.buffer)); }
-    catch (cause) { return error(res, 422, 'PDF_NOT_RECOGNIZED', cause.message || 'Não foi possível interpretar esta grade.'); }
-  });
-
-  app.post('/api/classes/import', (req, res) => {
-    if (!semesterFrom(db)) return error(res, 409, 'SEMESTER_REQUIRED', 'Configure o semestre antes de importar disciplinas.');
+    if (!req.file.buffer.subarray(0, 5).equals(Buffer.from('%PDF-'))) return error(res, 400, 'INVALID_FILE', 'Envie um arquivo PDF válido.');
+    if (ocrBusy) { res.setHeader('Retry-After', '30'); return error(res, 429, 'OCR_BUSY', 'Outro PDF está sendo processado. Tente novamente em instantes.'); }
+    ocrBusy = true; const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 90_000);
+    try { res.json(await inspectTimetablePdf(req.file.buffer, { signal: controller.signal })); }
+    catch (cause) { return error(res, cause.name === 'AbortError' ? 408 : 422, cause.name === 'AbortError' ? 'OCR_TIMEOUT' : 'PDF_NOT_RECOGNIZED', cause.name === 'AbortError' ? 'O processamento excedeu 90 segundos.' : cause.message || 'Não foi possível interpretar esta grade.'); }
+    finally { clearTimeout(timeout); ocrBusy = false; }
+  }));
+  app.post('/api/classes/import', asyncRoute(async (req, res) => {
+    if (!await req.repository.getSemester()) return error(res, 409, 'SEMESTER_REQUIRED', 'Configure o semestre antes de importar disciplinas.');
     if (!Array.isArray(req.body.subjects) || !req.body.subjects.length) return error(res, 400, 'VALIDATION_ERROR', 'Selecione ao menos uma disciplina.');
     const invalid = req.body.subjects.map((subject, index) => ({ index, fields: validateClass(subject) })).filter(item => Object.keys(item.fields).length);
     if (invalid.length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados das disciplinas antes de importar.', { subjects: invalid });
-    const insertClass = db.prepare('INSERT INTO classes (name,total_minutes,meeting_minutes,weekdays,start_time) VALUES (?,?,?,?,?)');
-    const insertSchedule = db.prepare('INSERT INTO class_schedules (class_id,weekday,start_time) VALUES (?,?,?)');
-    const created = [];
-    db.exec('BEGIN');
-    try {
-      for (const subject of req.body.subjects) {
-        const schedules = normalizedSchedules(subject);
-        const weekdays = [...new Set(schedules.map(item => item.weekday))].sort();
-        const result = insertClass.run(subject.name.trim(), subject.totalMinutes, subject.meetingMinutes, JSON.stringify(weekdays), schedules[0].startTime);
-        for (const item of schedules) insertSchedule.run(result.lastInsertRowid, item.weekday, item.startTime);
-        created.push(details(classFrom(db, result.lastInsertRowid)));
-      }
-      db.exec('COMMIT');
-      res.status(201).json(created);
-    } catch (cause) {
-      db.exec('ROLLBACK');
-      throw cause;
-    }
-  });
+    const created = await req.repository.importClasses(req.body.subjects.map(normalizedClass)); res.status(201).json(await Promise.all(created.map(item => details(req.repository, item))));
+  }));
 
-  app.get('/api/classes/:id/sessions', (req, res) => {
-    const subject = classFrom(db, req.params.id); const semester = semesterFrom(db);
-    if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    const exclusions = new Map(exclusionRowsFrom(db, subject.id).map(item => [item.date, item])); const absences = new Set(datesFrom(db, 'absences', subject.id));
-    const count = Math.floor(subject.totalMinutes / subject.meetingMinutes);
-    let dates = generateScheduledDatesByCount(semester.startDate, subject.schedules, count);
+  app.get('/api/classes/:id/sessions', asyncRoute(async (req, res) => {
+    const subject = await req.repository.getClass(req.params.id); const semester = await req.repository.getSemester(); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    const exclusions = new Map((await req.repository.getExclusions(subject.id)).map(item => [item.date, item])); const absences = new Set(await req.repository.getAbsences(subject.id));
+    let dates = generateScheduledDatesByCount(semester.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes));
     if (req.query.from) { if (!isIsoDate(req.query.from)) return error(res, 400, 'INVALID_RANGE', 'Informe uma data inicial válida.'); dates = dates.filter(date => date >= req.query.from); }
     if (req.query.to) { if (!isIsoDate(req.query.to)) return error(res, 400, 'INVALID_RANGE', 'Informe uma data final válida.'); dates = dates.filter(date => date <= req.query.to); }
     res.json(dates.map(date => ({ date, missed: absences.has(date), excluded: exclusions.has(date) && !exclusions.get(date).reinstated, reinstated: Boolean(exclusions.get(date)?.reinstated) })));
+  }));
+  const ensureScheduled = async (repository, subject, date) => { const semester = await repository.getSemester(); return Boolean(semester && isIsoDate(date) && generateScheduledDatesByCount(semester.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes)).includes(date)); };
+  app.post('/api/classes/:id/absences', asyncRoute(async (req, res) => {
+    const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    if (!await ensureScheduled(req.repository, subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.', { date: 'Escolha uma aula válida.' });
+    if ((await req.repository.getExclusions(subject.id)).some(item => item.date === req.body.date && !item.reinstated)) return error(res, 409, 'EXCLUDED_SESSION', 'Esta aula está marcada como cancelada. Marque-a como reposta antes de registrar falta.');
+    if (!await req.repository.addAbsence(subject.id, req.body.date)) return error(res, 409, 'DUPLICATE_ABSENCE', 'Esta falta já foi registrada.'); res.status(201).json(await details(req.repository, subject));
+  }));
+  app.delete('/api/classes/:id/absences/:date', asyncRoute(async (req, res) => await req.repository.deleteAbsence(req.params.id, req.params.date) ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Falta não encontrada.')));
+  app.post('/api/classes/:id/exclusions', asyncRoute(async (req, res) => {
+    const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    if (!await ensureScheduled(req.repository, subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.');
+    if ((await req.repository.getAbsences(subject.id)).includes(req.body.date)) return error(res, 409, 'ABSENCE_CONFLICT', 'Remova a falta desta data antes de cancelar a aula.');
+    await req.repository.cancelSession(subject.id, req.body.date); res.status(201).json(await details(req.repository, subject));
+  }));
+  app.patch('/api/classes/:id/exclusions/:date', asyncRoute(async (req, res) => {
+    const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    if (!await req.repository.reinstateSession(subject.id, req.params.date)) return error(res, 404, 'NOT_FOUND', 'Cancelamento não encontrado.'); res.json(await details(req.repository, subject));
+  }));
+  app.delete('/api/classes/:id/exclusions/:date', asyncRoute(async (req, res) => await req.repository.deleteExclusion(req.params.id, req.params.date) ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Cancelamento não encontrado.')));
+  app.use((err, req, res, _next) => {
+    const status = err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? 413 : 500;
+    console.error(JSON.stringify({ requestId: req.requestId, method: req.method, path: req.path, status, error: err.code || err.name || 'Error' }));
+    error(res, status, status === 413 ? 'FILE_TOO_LARGE' : 'INTERNAL_ERROR', status === 413 ? 'O PDF deve ter no máximo 10 MB.' : 'Ocorreu um erro inesperado.');
   });
-
-  const ensureScheduled = (subject, date) => { const semester = semesterFrom(db); const count = Math.floor(subject.totalMinutes / subject.meetingMinutes); return isIsoDate(date) && generateScheduledDatesByCount(semester.startDate, subject.schedules, count).includes(date); };
-  app.post('/api/classes/:id/absences', (req, res) => {
-    const subject = classFrom(db, req.params.id);
-    if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    if (!ensureScheduled(subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.', { date: 'Escolha uma aula válida.' });
-    if (exclusionRowsFrom(db, subject.id).some(item => item.date === req.body.date && !item.reinstated)) return error(res, 409, 'EXCLUDED_SESSION', 'Esta aula está marcada como cancelada. Marque-a como reposta antes de registrar falta.');
-    try { db.prepare('INSERT INTO absences (class_id,date) VALUES (?,?)').run(subject.id, req.body.date); } catch { return error(res, 409, 'DUPLICATE_ABSENCE', 'Esta falta já foi registrada.'); }
-    res.status(201).json(details(subject));
-  });
-  app.delete('/api/classes/:id/absences/:date', (req, res) => { const result = db.prepare('DELETE FROM absences WHERE class_id=? AND date=?').run(req.params.id, req.params.date); return result.changes ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Falta não encontrada.'); });
-  app.post('/api/classes/:id/exclusions', (req, res) => {
-    const subject = classFrom(db, req.params.id);
-    if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    if (!ensureScheduled(subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.');
-    if (datesFrom(db, 'absences', subject.id).includes(req.body.date)) return error(res, 409, 'ABSENCE_CONFLICT', 'Remova a falta desta data antes de cancelar a aula.');
-    const existing = exclusionRowsFrom(db, subject.id).find(item => item.date === req.body.date);
-    if (existing && !existing.reinstated) return error(res, 409, 'DUPLICATE_EXCLUSION', 'Esta aula já está cancelada.');
-    db.prepare('INSERT INTO exclusions (class_id,date,reinstated) VALUES (?,?,0) ON CONFLICT(class_id,date) DO UPDATE SET reinstated=0').run(subject.id, req.body.date);
-    res.status(201).json(details(subject));
-  });
-  app.patch('/api/classes/:id/exclusions/:date', (req, res) => {
-    const subject = classFrom(db, req.params.id);
-    if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    const result = db.prepare('UPDATE exclusions SET reinstated=1 WHERE class_id=? AND date=? AND reinstated=0').run(subject.id, req.params.date);
-    return result.changes ? res.json(details(subject)) : error(res, 404, 'NOT_FOUND', 'Aula cancelada não encontrada.');
-  });
-  app.delete('/api/classes/:id/exclusions/:date', (req, res) => { const result = db.prepare('DELETE FROM exclusions WHERE class_id=? AND date=?').run(req.params.id, req.params.date); return result.changes ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Cancelamento não encontrado.'); });
-
-  app.use((err, _req, res, _next) => { console.error(err); error(res, 500, 'INTERNAL_ERROR', 'Ocorreu um erro inesperado.'); });
   return app;
 }

@@ -1,0 +1,33 @@
+services:
+  - type: web
+    runtime: static
+    name: howmuchimissed-web
+    buildCommand: npm ci && npm run build -w client
+    staticPublishPath: ./client/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+  - type: web
+    runtime: node
+    plan: free
+    name: howmuchimissed-api
+    buildCommand: npm ci
+    startCommand: npm start -w server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

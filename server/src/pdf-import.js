@@ -96,7 +96,10 @@ function minutesBetween(startTime, endTime) {
 
 export const inferTotalMinutes = weeklyMeetingCount => weeklyMeetingCount * 40 * 60;
 
-export async function inspectTimetablePdf(buffer) {
+export async function inspectTimetablePdf(buffer, { signal } = {}) {
+  const abortError = () => new DOMException('Processamento cancelado.', 'AbortError');
+  const checkAborted = () => { if (signal?.aborted) throw abortError(); };
+  checkAborted();
   if (!buffer?.subarray(0, 5).equals(Buffer.from('%PDF-'))) throw new Error('O arquivo enviado não é um PDF válido.');
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const document = await pdfjs.getDocument({ data: new Uint8Array(buffer), disableWorker: true }).promise;
@@ -108,9 +111,12 @@ export async function inspectTimetablePdf(buffer) {
   await page.render({ canvasContext: context, viewport }).promise;
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
   const grid = findGrid(pixels, canvas.width, canvas.height);
-  const worker = await createWorker('por', OEM.LSTM_ONLY, { langPath: por.langPath, gzip: por.gzip });
+  let worker = await createWorker('por', OEM.LSTM_ONLY, { langPath: por.langPath, gzip: por.gzip });
+  const abort = () => { worker?.terminate().catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
   await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK, preserve_interword_spaces: '1' });
   try {
+    checkAborted();
     const titleCanvas = crop(canvas, grid.left, Math.max(0, grid.top - 100), grid.columns.at(-1) - grid.left, 100);
     const rawTitle = (await worker.recognize(titleCanvas.toBuffer('image/png'))).data.text.split('\n').map(v => v.trim()).find(v => v.length > 3) || 'Grade aSc TimeTables';
     const titleText = rawTitle.match(/[A-Z]{2,}\d+.*$/)?.[0] || rawTitle;
@@ -120,6 +126,7 @@ export async function inspectTimetablePdf(buffer) {
       if (timeCache.has(row)) return timeCache.get(row);
       const y1 = grid.rowLines[row]; const y2 = grid.rowLines[row + 1];
       const timeCanvas = crop(canvas, grid.left + 3, y1 + 3, grid.timeRight - grid.left - 6, y2 - y1 - 6, 3);
+      checkAborted();
       const text = (await worker.recognize(timeCanvas.toBuffer('image/png'))).data.text;
       const times = [...text.matchAll(/([01]?\d|2[0-3])[:.]([0-5]\d)/g)].map(match => `${match[1].padStart(2, '0')}:${match[2]}`);
       const result = times.length >= 2 ? { startTime: times[0], endTime: times[1] } : null;
@@ -142,6 +149,7 @@ export async function inspectTimetablePdf(buffer) {
         const first = rows[0]; const last = rows.at(-1);
         const x1 = grid.columns[column] + 3; const y1 = grid.rowLines[first] + 3;
         const cellCanvas = crop(canvas, x1, y1, grid.columns[column + 1] - x1 - 3, grid.rowLines[last + 1] - y1 - 3);
+        checkAborted();
         const parsed = parseCell((await worker.recognize(cellCanvas.toBuffer('image/png'))).data.text);
         const start = await readPeriod(first); const end = await readPeriod(last);
         if (parsed && start && end) meetings.push({ ...parsed, weekday: DAYS[column], startTime: start.startTime, endTime: end.endTime });
@@ -162,7 +170,13 @@ export async function inspectTimetablePdf(buffer) {
         return { ...subject, meetingMinutes: durations[0], totalMinutes: inferTotalMinutes(subject.schedules.length), selected: true, warnings: durations.some(value => value !== durations[0]) ? ['Os encontros têm durações diferentes; confirme os horários.'] : [] };
       })
     };
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    throw error;
   } finally {
-    await worker.terminate();
+    signal?.removeEventListener('abort', abort);
+    await worker?.terminate().catch(() => {});
+    worker = null;
+    await document.destroy();
   }
 }

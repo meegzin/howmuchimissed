@@ -2,13 +2,24 @@
   "name": "planner-server",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "node --watch src/index.js", "start": "node src/index.js", "test": "node --test" },
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=../.env src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test",
+    "admin:user": "node --env-file-if-exists=../.env scripts/supabase-admin.js",
+    "migrate:sqlite": "node --env-file-if-exists=../.env scripts/migrate-sqlite.js",
+    "backup": "node --env-file-if-exists=../.env scripts/backup.js"
+  },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.80",
+    "@supabase/supabase-js": "^2.112.4",
     "@tesseract.js-data/por": "^1.0.0",
+    "cors": "^2.8.6",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.6.2",
+    "helmet": "^8.3.0",
     "multer": "^2.0.2",
-    "pdfjs-dist": "^5.4.149",
+    "pdfjs-dist": "^6.2.108",
     "tesseract.js": "^6.0.1"
   }
 }
