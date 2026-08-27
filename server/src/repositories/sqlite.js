@@ -15,6 +15,17 @@ export function createSqliteRepository(db) {
   const exclusions = id => db.prepare('SELECT date, reinstated FROM exclusions WHERE class_id = ? ORDER BY date').all(id).map(row => ({ date: row.date, reinstated: Boolean(row.reinstated) }));
 
   return {
+    async getSnapshot() {
+      const classes = db.prepare('SELECT * FROM classes ORDER BY name').all().map(hydrate);
+      const absenceRows = db.prepare('SELECT CAST(class_id AS TEXT) classId,date FROM absences ORDER BY class_id,date').all();
+      const exclusionRows = db.prepare('SELECT CAST(class_id AS TEXT) classId,date,reinstated FROM exclusions ORDER BY class_id,date').all();
+      return {
+        semester: db.prepare('SELECT start_date AS startDate FROM semester WHERE id = 1').get() || null,
+        classes,
+        absencesByClass: Object.groupBy(absenceRows, row => row.classId),
+        exclusionsByClass: Object.groupBy(exclusionRows.map(row => ({ ...row, reinstated: Boolean(row.reinstated) })), row => row.classId)
+      };
+    },
     async getSemester() { return db.prepare('SELECT start_date AS startDate FROM semester WHERE id = 1').get() || null; },
     async setSemester(startDate) { db.prepare('INSERT INTO semester (id,start_date) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET start_date=excluded.start_date').run(startDate); return { startDate }; },
     async listClasses() { return db.prepare('SELECT * FROM classes ORDER BY name').all().map(hydrate); },

@@ -41,20 +41,22 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     const header = req.get('authorization') || ''; const token = header.startsWith('Bearer ') ? header.slice(7) : null;
     const auth = await authenticate(token);
     if (!auth) return error(res, 401, 'AUTH_REQUIRED', 'Entre na sua conta para continuar.');
-    req.auth = auth; req.repository = repositoryFor(token, auth.user);
+    req.auth = { ...auth, token }; req.repository = repositoryFor(token, auth.user);
     if (auth.user.app_metadata?.must_change_password && req.path !== '/account/password-changed') return error(res, 403, 'PASSWORD_CHANGE_REQUIRED', 'Troque a senha temporária antes de continuar.');
     next();
   }));
 
-  const details = async (repository, subject) => {
-    const semester = await repository.getSemester();
-    const [exclusionRows, absences] = await Promise.all([repository.getExclusions(subject.id), repository.getAbsences(subject.id)]);
+  const detailsFrom = (snapshot, subject) => {
+    const semester = snapshot.semester;
+    const exclusionRows = snapshot.exclusionsByClass[String(subject.id)] || [];
+    const absences = (snapshot.absencesByClass[String(subject.id)] || []).map(item => item.date);
     const exclusions = exclusionRows.filter(item => !item.reinstated).map(item => item.date);
     const reinstated = exclusionRows.filter(item => item.reinstated).map(item => item.date);
     const totalMeetings = Math.floor(subject.totalMinutes / subject.meetingMinutes);
     const dates = semester ? generateScheduledDatesByCount(semester.startDate, subject.schedules, totalMeetings) : [];
     return { ...subject, exclusions, reinstated, absences, sessionCount: dates.length, ...calculateSummary({ totalMinutes: subject.totalMinutes, meetingMinutes: subject.meetingMinutes, absenceCount: absences.length }) };
   };
+  const details = async (repository, subject) => detailsFrom(await repository.getSnapshot(), subject);
 
   app.post('/api/account/password-changed', asyncRoute(async (req, res) => { await accountAdmin?.markPasswordChanged(req.auth.user.id); res.status(204).end(); }));
   app.get('/api/account/export', asyncRoute(async (req, res) => res.json({ schemaVersion: 1, exportedAt: new Date().toISOString(), account: { id: req.auth.user.id, email: req.auth.user.email }, ...(await req.repository.exportData()) })));
@@ -62,6 +64,7 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     if (req.body?.confirmation !== 'EXCLUIR') return error(res, 400, 'CONFIRMATION_REQUIRED', 'Digite EXCLUIR para confirmar.');
     if (!req.auth.issuedAt || Date.now() / 1000 - req.auth.issuedAt > 300) return error(res, 403, 'RECENT_LOGIN_REQUIRED', 'Entre novamente antes de excluir a conta.');
     if (!accountAdmin?.deleteUser) return error(res, 501, 'NOT_AVAILABLE', 'Exclusão de conta indisponível neste ambiente.');
+    if (accountAdmin.verifyUser && !await accountAdmin.verifyUser(req.auth.token)) return error(res, 401, 'AUTH_REQUIRED', 'Entre novamente antes de excluir a conta.');
     await accountAdmin.deleteUser(req.auth.user.id); res.status(204).end();
   }));
 
@@ -77,9 +80,9 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
   }));
   app.get('/api/sessions', asyncRoute(async (req, res) => {
     const { from, to } = req.query; if (!isIsoDate(from) || !isIsoDate(to) || from > to) return error(res, 400, 'INVALID_RANGE', 'Informe um intervalo de datas válido.');
-    const semester = await req.repository.getSemester(); if (!semester) return res.json([]); const sessions = [];
-    for (const subject of await req.repository.listClasses()) {
-      const summary = await details(req.repository, subject); const exclusions = new Map((await req.repository.getExclusions(subject.id)).map(item => [item.date, item])); const absences = new Set(summary.absences);
+    const snapshot = await req.repository.getSnapshot(); const semester = snapshot.semester; if (!semester) return res.json([]); const sessions = [];
+    for (const subject of snapshot.classes) {
+      const summary = detailsFrom(snapshot, subject); const exclusions = new Map((snapshot.exclusionsByClass[String(subject.id)] || []).map(item => [item.date, item])); const absences = new Set(summary.absences);
       for (const date of generateScheduledDatesByCount(semester.startDate, subject.schedules, summary.totalMeetings).filter(date => date >= from && date <= to)) {
         const exclusion = exclusions.get(date); const schedule = subject.schedules.find(item => item.weekday === new Date(`${date}T00:00:00Z`).getUTCDay());
         sessions.push({ date, classId: subject.id, name: subject.name, startTime: schedule?.startTime, meetingMinutes: subject.meetingMinutes, missed: absences.has(date), excluded: Boolean(exclusion && !exclusion.reinstated), reinstated: Boolean(exclusion?.reinstated), absenceCount: summary.absenceCount, maxAbsences: summary.maxAbsences, status: summary.status });
@@ -87,7 +90,7 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     }
     sessions.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime) || a.name.localeCompare(b.name)); res.json(sessions);
   }));
-  app.get('/api/classes', asyncRoute(async (req, res) => res.json(await Promise.all((await req.repository.listClasses()).map(subject => details(req.repository, subject))))));
+  app.get('/api/classes', asyncRoute(async (req, res) => { const snapshot = await req.repository.getSnapshot(); res.json(snapshot.classes.map(subject => detailsFrom(snapshot, subject))); }));
   app.get('/api/classes/:id', asyncRoute(async (req, res) => { const item = await req.repository.getClass(req.params.id); return item ? res.json(await details(req.repository, item)) : error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.'); }));
   app.post('/api/classes', asyncRoute(async (req, res) => {
     if (!await req.repository.getSemester()) return error(res, 409, 'SEMESTER_REQUIRED', 'Configure o semestre antes de criar disciplinas.');
@@ -120,7 +123,7 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     if (!Array.isArray(req.body.subjects) || !req.body.subjects.length) return error(res, 400, 'VALIDATION_ERROR', 'Selecione ao menos uma disciplina.');
     const invalid = req.body.subjects.map((subject, index) => ({ index, fields: validateClass(subject) })).filter(item => Object.keys(item.fields).length);
     if (invalid.length) return error(res, 400, 'VALIDATION_ERROR', 'Revise os dados das disciplinas antes de importar.', { subjects: invalid });
-    const created = await req.repository.importClasses(req.body.subjects.map(normalizedClass)); res.status(201).json(await Promise.all(created.map(item => details(req.repository, item))));
+    const created = await req.repository.importClasses(req.body.subjects.map(normalizedClass)); const snapshot = await req.repository.getSnapshot(); res.status(201).json(created.map(item => detailsFrom(snapshot, item)));
   }));
 
   app.get('/api/classes/:id/sessions', asyncRoute(async (req, res) => {
@@ -138,7 +141,11 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     if ((await req.repository.getExclusions(subject.id)).some(item => item.date === req.body.date && !item.reinstated)) return error(res, 409, 'EXCLUDED_SESSION', 'Esta aula está marcada como cancelada. Marque-a como reposta antes de registrar falta.');
     if (!await req.repository.addAbsence(subject.id, req.body.date)) return error(res, 409, 'DUPLICATE_ABSENCE', 'Esta falta já foi registrada.'); res.status(201).json(await details(req.repository, subject));
   }));
-  app.delete('/api/classes/:id/absences/:date', asyncRoute(async (req, res) => await req.repository.deleteAbsence(req.params.id, req.params.date) ? res.status(204).end() : error(res, 404, 'NOT_FOUND', 'Falta não encontrada.')));
+  app.delete('/api/classes/:id/absences/:date', asyncRoute(async (req, res) => {
+    const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    if (!await req.repository.deleteAbsence(subject.id, req.params.date)) return error(res, 404, 'NOT_FOUND', 'Falta não encontrada.');
+    res.json(await details(req.repository, subject));
+  }));
   app.post('/api/classes/:id/exclusions', asyncRoute(async (req, res) => {
     const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
     if (!await ensureScheduled(req.repository, subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.');

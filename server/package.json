@@ -8,7 +8,8 @@
     "test": "node --test",
     "admin:user": "node --env-file-if-exists=../.env scripts/supabase-admin.js",
     "migrate:sqlite": "node --env-file-if-exists=../.env scripts/migrate-sqlite.js",
-    "backup": "node --env-file-if-exists=../.env scripts/backup.js"
+    "backup": "node --env-file-if-exists=../.env scripts/backup.js",
+    "verify:deploy": "node --env-file-if-exists=../.env scripts/verify-deploy.js"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.80",

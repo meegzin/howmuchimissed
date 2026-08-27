@@ -10,6 +10,21 @@ export function createSupabaseRepository(client, userId) {
   const classSelect = 'id,name,total_minutes,meeting_minutes,class_schedules(weekday,start_time)';
   const getClass = async id => mapClass(unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).eq('id', id).maybeSingle()));
   return {
+    async getSnapshot() {
+      const [semesterResult, classesResult, absencesResult, exclusionsResult] = await Promise.all([
+        client.from('semesters').select('start_date').eq('user_id', userId).maybeSingle(),
+        client.from('classes').select(classSelect).eq('user_id', userId).order('name'),
+        client.from('absences').select('class_id,date').eq('user_id', userId).order('date'),
+        client.from('exclusions').select('class_id,date,reinstated').eq('user_id', userId).order('date')
+      ]);
+      const semester = unwrap(semesterResult); const absences = unwrap(absencesResult); const exclusions = unwrap(exclusionsResult);
+      return {
+        semester: semester ? { startDate: semester.start_date } : null,
+        classes: unwrap(classesResult).map(mapClass),
+        absencesByClass: Object.groupBy(absences, row => row.class_id),
+        exclusionsByClass: Object.groupBy(exclusions, row => row.class_id)
+      };
+    },
     async getSemester() { const data = unwrap(await client.from('semesters').select('start_date').eq('user_id', userId).maybeSingle()); return data ? { startDate: data.start_date } : null; },
     async setSemester(startDate) { unwrap(await client.from('semesters').upsert({ user_id: userId, start_date: startDate })); return { startDate }; },
     async listClasses() { return unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).order('name')).map(mapClass); },

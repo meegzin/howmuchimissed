@@ -21,16 +21,17 @@ if (supabaseUrl && publishableKey && secretKey) {
     allowedOrigins,
     authenticate: async token => {
       if (!token) return null;
-      const { data, error } = await authClient.auth.getUser(token);
-      if (error || !data.user) return null;
-      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-      return { user: data.user, issuedAt: payload.iat };
+      const { data, error } = await authClient.auth.getClaims(token);
+      const claims = data?.claims;
+      if (error || !claims?.sub) return null;
+      return { user: { id: claims.sub, email: claims.email, app_metadata: claims.app_metadata || {} }, issuedAt: claims.iat };
     },
     repositoryFor: (token, user) => createSupabaseRepository(createClient(supabaseUrl, publishableKey, {
       global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false, autoRefreshToken: false }
     }), user.id),
     accountAdmin: {
       async health() { const { error } = await admin.from('semesters').select('user_id', { head: true, count: 'exact' }).limit(1); if (error) throw error; },
+      async verifyUser(token) { const { data, error } = await authClient.auth.getUser(token); return !error && Boolean(data.user); },
       async markPasswordChanged(id) { const { data } = await admin.auth.admin.getUserById(id); const metadata = { ...(data.user?.app_metadata || {}), must_change_password: false }; const { error } = await admin.auth.admin.updateUserById(id, { app_metadata: metadata }); if (error) throw error; },
       async deleteUser(id) { const { error } = await admin.auth.admin.deleteUser(id); if (error) throw error; }
     }

@@ -79,3 +79,15 @@ test('lista aulas agregadas para a timeline semanal', async t => {
     ['2026-08-03', 'UX', '13:00'], ['2026-08-06', 'Dados', '15:10']
   ]);
 });
+test('carrega timeline com um snapshot, sem consultas por disciplina', async t => {
+  const db = createDatabase(':memory:'); const baseRepository = createSqliteRepository(db); const calls = {};
+  const repository = new Proxy(baseRepository, { get(target, property) { const value = target[property]; return typeof value !== 'function' ? value : async (...args) => { calls[property] = (calls[property] || 0) + 1; return value.apply(target, args); }; } });
+  const server = createApp({ repositoryFor: () => repository, authenticate: async () => ({ user: { id: 'test-user', app_metadata: {} }, issuedAt: Math.floor(Date.now() / 1000) }), localMode: true }).listen(0);
+  t.after(() => { server.close(); db.close(); }); const base = `http://127.0.0.1:${server.address().port}`; const headers = { 'content-type': 'application/json', authorization: 'Bearer test' };
+  const call = (path, options = {}) => fetch(base + path, { headers, ...options });
+  await call('/api/semester', { method: 'PUT', body: JSON.stringify({ startDate: '2026-08-01' }) });
+  for (const name of ['A', 'B', 'C']) await call('/api/classes', { method: 'POST', body: JSON.stringify({ name, totalMinutes: 1200, meetingMinutes: 100, weekdays: [1], startTime: '08:00' }) });
+  for (const key of Object.keys(calls)) delete calls[key];
+  assert.equal((await call('/api/sessions?from=2026-08-03&to=2026-08-09')).status, 200);
+  assert.deepEqual(calls, { getSnapshot: 1 });
+});
