@@ -62,3 +62,7 @@ O arquivo contém dados de todos os usuários. Guarde-o em local protegido e for
 O `render.yaml` cria um Static Site para o React e um Web Service gratuito para a API. Conecte o repositório no Render, preencha as variáveis marcadas como secretas e, depois de obter a URL do frontend, use-a em `ALLOWED_ORIGINS`.
 
 O serviço gratuito pode adormecer após inatividade. O PostgreSQL permanece no Supabase; nenhum dado persistente depende do filesystem do Render.
+
+### Monitoramento
+
+`/api/health` verifica o processo HTTP para o Render, sem consultar o banco e sem consumir a cota de requisicoes. `/api/ready` verifica a conexao com o Supabase com timeout de 3 segundos e retorna 503 quando indisponivel. Use `npm run verify:deploy -w server` para verificar ambos. Health 200 sozinho nao garante disponibilidade do banco.

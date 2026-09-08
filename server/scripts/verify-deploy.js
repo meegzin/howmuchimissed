@@ -13,3 +13,7 @@ console.log('Supabase configurado no bundle:', bundle.includes(new URL(process.e
 const health = await fetch(`${apiUrl}/api/health`, { headers: { Origin: webUrl } });
 console.log('Health check:', health.ok ? 'OK' : `FALHOU (${health.status})`);
 console.log('CORS frontend -> API:', health.headers.get('access-control-allow-origin') === webUrl ? 'OK' : 'FALHOU');
+
+const readiness = await fetch(apiUrl + '/api/ready', { signal: AbortSignal.timeout(10000) });
+console.log('Conexao com banco:', readiness.ok ? 'OK' : 'FALHOU (' + readiness.status + ')');
+if (!htmlResponse.ok || !bundle.includes(apiUrl) || !bundle.includes(new URL(process.env.SUPABASE_URL).hostname) || !health.ok || health.headers.get('access-control-allow-origin') !== webUrl || !readiness.ok) process.exitCode = 1;

@@ -33,9 +33,20 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
   app.use(cors({ origin(origin, callback) { callback(null, !origin || localMode || allowedOrigins.includes(origin)); } }));
   app.use(express.json({ limit: '256kb' }));
   app.use((req, res, next) => { req.requestId = crypto.randomUUID(); res.setHeader('X-Request-Id', req.requestId); next(); });
+  // Render probes must not consume the application quota or depend on Supabase.
+  app.get('/api/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ status: 'ok' }));
   app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: 'draft-8', legacyHeaders: false }));
-
-  app.get('/api/health', asyncRoute(async (_req, res) => { if (accountAdmin?.health) await accountAdmin.health(); res.json({ status: 'ok' }); }));
+  app.get('/api/ready', asyncRoute(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      if (accountAdmin?.health) await accountAdmin.health();
+      res.json({ status: 'ok' });
+    } catch (cause) {
+      const safeCode = value => typeof value === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : undefined;
+      console.error(JSON.stringify({ requestId: req.requestId, method: req.method, path: req.path, status: 503, dependency: 'database', error: safeCode(cause.name) || 'Error', code: safeCode(cause.code), causeCode: safeCode(cause.cause?.code), upstreamStatus: Number.isInteger(cause.status) ? cause.status : undefined }));
+      res.status(503).json({ status: 'unavailable', dependency: 'database' });
+    }
+  }));
   app.use('/api', asyncRoute(async (req, res, next) => {
     const header = req.get('authorization') || ''; const token = header.startsWith('Bearer ') ? header.slice(7) : null;
     const auth = await authenticate(token);

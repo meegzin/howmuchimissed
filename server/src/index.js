@@ -30,7 +30,7 @@ if (supabaseUrl && publishableKey && secretKey) {
       global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false, autoRefreshToken: false }
     }), user.id),
     accountAdmin: {
-      async health() { const { error } = await admin.from('semesters').select('user_id', { head: true, count: 'exact' }).limit(1); if (error) throw error; },
+      async health() { const { error } = await admin.from('semesters').select('user_id', { head: true }).limit(1).abortSignal(AbortSignal.timeout(3000)); if (error) throw error; },
       async verifyUser(token) { const { data, error } = await authClient.auth.getUser(token); return !error && Boolean(data.user); },
       async markPasswordChanged(id) { const { data } = await admin.auth.admin.getUserById(id); const metadata = { ...(data.user?.app_metadata || {}), must_change_password: false }; const { error } = await admin.auth.admin.updateUserById(id, { app_metadata: metadata }); if (error) throw error; },
       async deleteUser(id) { const { error } = await admin.auth.admin.deleteUser(id); if (error) throw error; }

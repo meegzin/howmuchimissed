@@ -113,3 +113,27 @@ test('planner e faltas usam leituras limitadas e retornam o estado persistido', 
   assert.equal(removed.status, 200);
   assert.equal((await removed.json()).absenceCount, 0);
 });
+
+
+test('health permanece disponivel sem banco e nao consome a cota da API', async t => {
+  let checks = 0; let unavailable = true;
+  const server = createApp({ repositoryFor: () => ({}), authenticate: async () => null, accountAdmin: { async health() { checks++; if (unavailable) throw Object.assign(new Error('private information'), { code: 'ECONNRESET' }); } }, localMode: true }).listen(0);
+  t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  for (let i = 0; i < 105; i++) {
+    const health = await fetch(base + '/api/health');
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get('cache-control'), 'no-store');
+    await health.json();
+  }
+  assert.equal(checks, 0);
+  const failed = await fetch(base + '/api/ready');
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), { status: 'unavailable', dependency: 'database' });
+  unavailable = false;
+  const ready = await fetch(base + '/api/ready');
+  assert.equal(ready.status, 200);
+  assert.deepEqual(await ready.json(), { status: 'ok' });
+  assert.equal(checks, 2);
+  assert.equal((await fetch(base + '/api/classes')).status, 401);
+});
