@@ -91,3 +91,25 @@ test('carrega timeline com um snapshot, sem consultas por disciplina', async t =
   assert.equal((await call('/api/sessions?from=2026-08-03&to=2026-08-09')).status, 200);
   assert.deepEqual(calls, { getSnapshot: 1 });
 });
+
+
+test('planner e faltas usam leituras limitadas e retornam o estado persistido', async t => {
+  const db = createDatabase(':memory:'); const repository = createSqliteRepository(db);
+  await repository.setSemester('2026-08-01');
+  const subject = await repository.createClass({ name: 'A', totalMinutes: 1200, meetingMinutes: 100, schedules: [{ weekday: 1, startTime: '08:00' }] });
+  const server = createApp({ repositoryFor: () => repository, authenticate: async () => ({ user: { id: 'test-user' } }), localMode: true }).listen(0);
+  t.after(() => { server.close(); db.close(); });
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const planner = await (await fetch(base + '/api/planner')).json();
+  assert.equal(planner.semester.startDate, '2026-08-01');
+  assert.equal(planner.classes[0].sessionCount, 12);
+  repository.getSnapshot = async () => { throw new Error('Full snapshot forbidden during mutations'); };
+  const response = await fetch(base + '/api/classes/' + subject.id + '/absences', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ date: '2026-08-03' }) });
+  assert.equal(response.status, 201);
+  const updated = await response.json();
+  assert.deepEqual(updated.absences, await repository.getAbsences(subject.id));
+  assert.equal(updated.absenceCount, 1);
+  const removed = await fetch(base + '/api/classes/' + subject.id + '/absences/2026-08-03', { method: 'DELETE' });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json()).absenceCount, 0);
+});

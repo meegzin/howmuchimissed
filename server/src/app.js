@@ -4,7 +4,6 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import multer from 'multer';
 import { calculateSummary, generateScheduledDatesByCount, isIsoDate } from './domain.js';
-import { inspectTimetablePdf } from './pdf-import.js';
 
 const error = (res, status, code, message, fields) => res.status(status).json({ code, message, ...(fields && { fields }) });
 const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -56,7 +55,14 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     const dates = semester ? generateScheduledDatesByCount(semester.startDate, subject.schedules, totalMeetings) : [];
     return { ...subject, exclusions, reinstated, absences, sessionCount: dates.length, ...calculateSummary({ totalMinutes: subject.totalMinutes, meetingMinutes: subject.meetingMinutes, absenceCount: absences.length }) };
   };
-  const details = async (repository, subject) => detailsFrom(await repository.getSnapshot(), subject);
+  const classSnapshot = async (repository, id) => {
+    const [semester, subject, exclusions] = await Promise.all([repository.getSemester(), repository.getClass(id), repository.getExclusions(id)]);
+    return { semester, classes: subject ? [subject] : [], absencesByClass: {}, exclusionsByClass: { [id]: exclusions } };
+  };
+  const details = async (repository, subject) => {
+    const [semester, absences, exclusions] = await Promise.all([repository.getSemester(), repository.getAbsences(subject.id), repository.getExclusions(subject.id)]);
+    return detailsFrom({ semester, absencesByClass: { [subject.id]: absences.map(date => ({ date })) }, exclusionsByClass: { [subject.id]: exclusions } }, subject);
+  };
 
   app.post('/api/account/password-changed', asyncRoute(async (req, res) => { await accountAdmin?.markPasswordChanged(req.auth.user.id); res.status(204).end(); }));
   app.get('/api/account/export', asyncRoute(async (req, res) => res.json({ schemaVersion: 1, exportedAt: new Date().toISOString(), account: { id: req.auth.user.id, email: req.auth.user.email }, ...(await req.repository.exportData()) })));
@@ -68,12 +74,14 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     await accountAdmin.deleteUser(req.auth.user.id); res.status(204).end();
   }));
 
+  app.get('/api/planner', asyncRoute(async (req, res) => { const snapshot = await req.repository.getSnapshot(); res.json({ semester: snapshot.semester, classes: snapshot.classes.map(subject => detailsFrom(snapshot, subject)) }); }));
   app.get('/api/semester', asyncRoute(async (req, res) => res.json(await req.repository.getSemester())));
   app.put('/api/semester', asyncRoute(async (req, res) => {
     const fields = validateSemester(req.body); if (Object.keys(fields).length) return error(res, 400, 'VALIDATION_ERROR', 'Revise as datas do semestre.', fields);
-    for (const subject of await req.repository.listClasses()) {
+    const snapshot = await req.repository.getSnapshot();
+    for (const subject of snapshot.classes) {
       const valid = new Set(generateScheduledDatesByCount(req.body.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes)));
-      const history = [...await req.repository.getAbsences(subject.id), ...(await req.repository.getExclusions(subject.id)).map(item => item.date)];
+      const history = [...(snapshot.absencesByClass[subject.id] || []), ...(snapshot.exclusionsByClass[subject.id] || [])].map(item => item.date);
       if (history.some(date => !valid.has(date))) return error(res, 409, 'SESSION_CONFLICT', 'A alteração invalidaria uma aula com histórico. Remova o registro antes de alterar o início.');
     }
     res.json(await req.repository.setSemester(req.body.startDate));
@@ -114,7 +122,7 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     if (!req.file.buffer.subarray(0, 5).equals(Buffer.from('%PDF-'))) return error(res, 400, 'INVALID_FILE', 'Envie um arquivo PDF válido.');
     if (ocrBusy) { res.setHeader('Retry-After', '30'); return error(res, 429, 'OCR_BUSY', 'Outro PDF está sendo processado. Tente novamente em instantes.'); }
     ocrBusy = true; const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 90_000);
-    try { res.json(await inspectTimetablePdf(req.file.buffer, { signal: controller.signal })); }
+    try { const { inspectTimetablePdf } = await import('./pdf-import.js'); res.json(await inspectTimetablePdf(req.file.buffer, { signal: controller.signal })); }
     catch (cause) { return error(res, cause.name === 'AbortError' ? 408 : 422, cause.name === 'AbortError' ? 'OCR_TIMEOUT' : 'PDF_NOT_RECOGNIZED', cause.name === 'AbortError' ? 'O processamento excedeu 90 segundos.' : cause.message || 'Não foi possível interpretar esta grade.'); }
     finally { clearTimeout(timeout); ocrBusy = false; }
   }));
@@ -136,10 +144,10 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
   }));
   const ensureScheduled = async (repository, subject, date) => { const semester = await repository.getSemester(); return Boolean(semester && isIsoDate(date) && generateScheduledDatesByCount(semester.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes)).includes(date)); };
   app.post('/api/classes/:id/absences', asyncRoute(async (req, res) => {
-    const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
-    if (!await ensureScheduled(req.repository, subject, req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.', { date: 'Escolha uma aula válida.' });
-    if ((await req.repository.getExclusions(subject.id)).some(item => item.date === req.body.date && !item.reinstated)) return error(res, 409, 'EXCLUDED_SESSION', 'Esta aula está marcada como cancelada. Marque-a como reposta antes de registrar falta.');
-    if (!await req.repository.addAbsence(subject.id, req.body.date)) return error(res, 409, 'DUPLICATE_ABSENCE', 'Esta falta já foi registrada.'); res.status(201).json(await details(req.repository, subject));
+    const snapshot = await classSnapshot(req.repository, req.params.id); const subject = snapshot.classes[0]; if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
+    if (!snapshot.semester || !isIsoDate(req.body.date) || !generateScheduledDatesByCount(snapshot.semester.startDate, subject.schedules, Math.floor(subject.totalMinutes / subject.meetingMinutes)).includes(req.body.date)) return error(res, 400, 'INVALID_SESSION', 'A data não corresponde a uma aula desta disciplina.', { date: 'Escolha uma aula válida.' });
+    if ((snapshot.exclusionsByClass[subject.id]).some(item => item.date === req.body.date && !item.reinstated)) return error(res, 409, 'EXCLUDED_SESSION', 'Esta aula está marcada como cancelada. Marque-a como reposta antes de registrar falta.');
+    if (!await req.repository.addAbsence(subject.id, req.body.date)) return error(res, 409, 'DUPLICATE_ABSENCE', 'Esta falta já foi registrada.'); snapshot.absencesByClass[subject.id] = (await req.repository.getAbsences(subject.id)).map(date => ({ date })); res.status(201).json(detailsFrom(snapshot, subject));
   }));
   app.delete('/api/classes/:id/absences/:date', asyncRoute(async (req, res) => {
     const subject = await req.repository.getClass(req.params.id); if (!subject) return error(res, 404, 'NOT_FOUND', 'Disciplina não encontrada.');
