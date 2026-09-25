@@ -5,3 +5,40 @@
 @media(max-width:700px){.topbar{height:auto;padding:15px 18px;align-items:flex-start}.semester-label{display:none}.semester-button{max-width:180px}.dashboard{padding:35px 16px}.timeline-section{margin-bottom:42px}.timeline-heading{align-items:center}.timeline-heading h2{font-size:14px}.timeline{gap:4px;overflow-x:auto}.timeline-day{min-width:68px;min-height:92px;padding:10px 5px}.timeline-day strong{font-size:21px}.daily-class{grid-template-columns:65px 1fr}.daily-class>button{grid-column:1/-1}.hero{align-items:flex-start;gap:22px}.hero h1{font-size:32px}.hero-actions{flex-direction:column}.hero-actions button{font-size:11px;padding:10px}.metrics{gap:8px}.metrics strong{font-size:21px}.class-card{padding:20px 17px}.session{align-items:flex-start;gap:10px}.session-actions{flex-direction:column;align-items:stretch}.setup{grid-template-columns:1fr;padding:40px 22px}.setup .brand{display:none}.setup h1{font-size:39px}.form-grid,.schedule-times{grid-template-columns:1fr}.modal{padding:28px 16px}.semester-button{font-size:10px}.import-subject{grid-template-columns:25px 1fr}.hours-field{grid-column:2}.import-schedules div{flex-wrap:wrap}.import-summary{flex-direction:column}}
 .auth-page{min-height:100vh;display:grid;place-items:center;padding:24px;background:#173e32}.auth-card{width:min(440px,100%);background:#fbfbf8;border-radius:16px;padding:38px;box-shadow:0 20px 60px #0b211a55}.auth-card h1{font:800 31px/1.15 Manrope;margin:8px 0}.auth-card>p{color:var(--muted)}.auth-card form{display:grid;gap:15px;margin-top:25px}.auth-wordmark{color:var(--ink);margin-bottom:30px}.privacy-link{display:block;margin:22px auto 0;background:transparent;color:var(--green);padding:4px}.privacy p{line-height:1.6;color:var(--muted)}.account-fab{position:fixed;right:18px;bottom:18px;z-index:4;display:flex;gap:7px;padding:7px;background:#ffffffee;border:1px solid var(--line);border-radius:12px;box-shadow:0 5px 20px #1d302725}.account-fab button{font-size:11px;padding:9px 12px}.account-modal form{display:grid;gap:12px;padding-bottom:25px;border-bottom:1px solid var(--line)}.account-modal h3{font:700 16px Manrope;margin:15px 0 4px}.account-actions{display:grid;gap:12px}.danger-zone{display:grid;gap:10px;margin-top:15px;padding:17px;border:1px solid #e5b9b5;background:#fff5f4;border-radius:9px}.danger-zone p{font-size:12px;color:#77372f;margin:0}@media(max-width:700px){.auth-card{padding:28px 20px}.account-fab{right:10px;bottom:10px}.account-fab .secondary{max-width:180px;overflow:hidden;text-overflow:ellipsis}}
 .form-success{background:#e2f1e8;color:#175b45;padding:10px;border-radius:6px;font-size:12px}
+@media(max-width:700px){
+  .backdrop{padding:max(12px,env(safe-area-inset-top)) 12px max(12px,env(safe-area-inset-bottom))}
+  .modal{width:100%;max-height:calc(100dvh - 24px);padding:28px 16px calc(20px + env(safe-area-inset-bottom));overscroll-behavior:contain}
+  .modal h2{padding-right:32px;font-size:24px;line-height:1.2}
+  .modal button,.auth-card button,.timeline button,.session-actions button,.file-button{min-height:44px}
+  .modal .actions{flex-direction:column-reverse}
+  .modal .actions button{width:100%}
+  .hero{flex-direction:column;gap:14px}
+  .hero-actions{width:100%}
+  .hero-actions button{width:100%;min-height:44px;font-size:13px}
+  .timeline{grid-template-columns:repeat(7,minmax(68px,1fr));scroll-snap-type:x proximity}
+  .timeline-day{scroll-snap-align:start}
+  .session{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+  .session-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;align-items:stretch}
+  .session-actions button{white-space:normal;padding:8px 6px}
+  .daily-class{grid-template-columns:58px minmax(0,1fr);gap:10px;padding:12px}
+  .daily-class>button{width:100%;min-height:44px}
+  .modal input:not([type="checkbox"]),.auth-card input{font-size:16px}
+  .import-subject{grid-template-columns:24px minmax(0,1fr);gap:8px;padding:12px 10px}
+  .import-fields,.import-schedules{min-width:0}
+  .import-schedules div{width:100%}
+  .import-schedules input{width:min(92px,100%)}
+  .hours-field{grid-column:2}
+  .account-fab{right:10px;bottom:max(10px,env(safe-area-inset-bottom));max-width:calc(100vw - 20px);flex-wrap:wrap;justify-content:center}
+  .sticky-actions{bottom:-16px}
+}
+@media(max-width:380px){
+  .topbar{padding-right:12px;padding-left:12px;gap:8px}
+  .wordmark{gap:8px}
+  .semester-button{max-width:150px;padding:9px 10px}
+  .dashboard{padding-right:12px;padding-left:12px}
+  .timeline{grid-template-columns:repeat(7,minmax(62px,1fr))}
+  .metrics{gap:5px}
+  .metrics span{font-size:10px}
+  .compact-summary{gap:8px}
+  .auth-card{padding-right:16px;padding-left:16px}
+}
