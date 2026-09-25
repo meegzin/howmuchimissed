@@ -11,6 +11,7 @@ export function createDatabase(filename) {
     CREATE TABLE IF NOT EXISTS classes (
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, total_minutes INTEGER NOT NULL,
       meeting_minutes INTEGER NOT NULL, weekdays TEXT NOT NULL, start_time TEXT NOT NULL,
+      prior_absences INTEGER NOT NULL DEFAULT 0 CHECK (prior_absences >= 0),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS class_schedules (
@@ -30,6 +31,10 @@ export function createDatabase(filename) {
       PRIMARY KEY (class_id, date)
     );
   `);
+  const classColumns = db.prepare('PRAGMA table_info(classes)').all();
+  if (!classColumns.some(column => column.name === 'prior_absences')) {
+    db.exec('ALTER TABLE classes ADD COLUMN prior_absences INTEGER NOT NULL DEFAULT 0 CHECK (prior_absences >= 0)');
+  }
   const withoutSchedules = db.prepare(`
     SELECT id, weekdays, start_time FROM classes
     WHERE NOT EXISTS (SELECT 1 FROM class_schedules WHERE class_id = classes.id)

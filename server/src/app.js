@@ -14,6 +14,8 @@ function validateClass(body) {
   if (!Number.isInteger(body.totalMinutes) || body.totalMinutes <= 0) fields.totalMinutes = 'Informe uma carga horária positiva.';
   if (!Number.isInteger(body.meetingMinutes) || body.meetingMinutes <= 0) fields.meetingMinutes = 'Informe uma duração positiva.';
   if (body.meetingMinutes > body.totalMinutes) fields.meetingMinutes = 'A duração não pode superar a carga horária.';
+  if (body.priorAbsences === undefined) body.priorAbsences = 0;
+  if (!Number.isInteger(body.priorAbsences) || body.priorAbsences < 0) fields.priorAbsences = 'Use um nÃºmero inteiro igual ou maior que zero.';
   const schedules = body.schedules || (Array.isArray(body.weekdays) ? body.weekdays.map(weekday => ({ weekday, startTime: body.startTime })) : []);
   if (!Array.isArray(schedules) || !schedules.length || schedules.some(item => !Number.isInteger(item.weekday) || item.weekday < 0 || item.weekday > 6)) fields.weekdays = 'Informe ao menos um encontro semanal.';
   if (schedules.some(item => !/^([01]\d|2[0-3]):[0-5]\d$/.test(item.startTime || ''))) fields.startTime = 'Informe horários válidos.';
@@ -22,7 +24,7 @@ function validateClass(body) {
   return fields;
 }
 const normalizedSchedules = body => body.schedules || body.weekdays.map(weekday => ({ weekday, startTime: body.startTime }));
-const normalizedClass = body => ({ name: body.name.trim(), totalMinutes: body.totalMinutes, meetingMinutes: body.meetingMinutes, schedules: normalizedSchedules(body) });
+const normalizedClass = body => ({ name: body.name.trim(), totalMinutes: body.totalMinutes, meetingMinutes: body.meetingMinutes, priorAbsences: body.priorAbsences || 0, schedules: normalizedSchedules(body) });
 
 export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOrigins = [], localMode = false }) {
   const app = express();
@@ -64,7 +66,7 @@ export function createApp({ repositoryFor, authenticate, accountAdmin, allowedOr
     const reinstated = exclusionRows.filter(item => item.reinstated).map(item => item.date);
     const totalMeetings = Math.floor(subject.totalMinutes / subject.meetingMinutes);
     const dates = semester ? generateScheduledDatesByCount(semester.startDate, subject.schedules, totalMeetings) : [];
-    return { ...subject, exclusions, reinstated, absences, sessionCount: dates.length, ...calculateSummary({ totalMinutes: subject.totalMinutes, meetingMinutes: subject.meetingMinutes, absenceCount: absences.length }) };
+    return { ...subject, exclusions, reinstated, absences, sessionCount: dates.length, ...calculateSummary({ totalMinutes: subject.totalMinutes, meetingMinutes: subject.meetingMinutes, absenceCount: absences.length + (subject.priorAbsences || 0) }) };
   };
   const classSnapshot = async (repository, id) => {
     const [semester, subject, exclusions] = await Promise.all([repository.getSemester(), repository.getClass(id), repository.getExclusions(id)]);

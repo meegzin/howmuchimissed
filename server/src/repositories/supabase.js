@@ -1,5 +1,6 @@
 const mapClass = row => ({
   id: row.id, name: row.name, totalMinutes: row.total_minutes, meetingMinutes: row.meeting_minutes,
+  priorAbsences: row.prior_absences || 0,
   weekdays: row.class_schedules.map(item => item.weekday).sort(), startTime: row.class_schedules[0]?.start_time?.slice(0, 5),
   schedules: row.class_schedules.map(item => ({ weekday: item.weekday, startTime: item.start_time.slice(0, 5) })).sort((a, b) => a.weekday - b.weekday || a.startTime.localeCompare(b.startTime))
 });
@@ -7,7 +8,7 @@ const mapClass = row => ({
 const unwrap = result => { if (result.error) throw result.error; return result.data; };
 
 export function createSupabaseRepository(client, userId) {
-  const classSelect = 'id,name,total_minutes,meeting_minutes,class_schedules(weekday,start_time)';
+  const classSelect = 'id,name,total_minutes,meeting_minutes,prior_absences,class_schedules(weekday,start_time)';
   const getClass = async id => mapClass(unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).eq('id', id).maybeSingle()));
   return {
     async getSnapshot() {
@@ -29,8 +30,8 @@ export function createSupabaseRepository(client, userId) {
     async setSemester(startDate) { unwrap(await client.from('semesters').upsert({ user_id: userId, start_date: startDate })); return { startDate }; },
     async listClasses() { return unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).order('name')).map(mapClass); },
     async getClass(id) { const data = unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).eq('id', id).maybeSingle()); return data ? mapClass(data) : null; },
-    async createClass(subject) { const id = unwrap(await client.rpc('save_class', { p_id: null, p_name: subject.name, p_total_minutes: subject.totalMinutes, p_meeting_minutes: subject.meetingMinutes, p_schedules: subject.schedules })); return getClass(id); },
-    async updateClass(id, subject) { const saved = unwrap(await client.rpc('save_class', { p_id: id, p_name: subject.name, p_total_minutes: subject.totalMinutes, p_meeting_minutes: subject.meetingMinutes, p_schedules: subject.schedules })); return getClass(saved); },
+    async createClass(subject) { const id = unwrap(await client.rpc('save_class', { p_id: null, p_name: subject.name, p_total_minutes: subject.totalMinutes, p_meeting_minutes: subject.meetingMinutes, p_prior_absences: subject.priorAbsences, p_schedules: subject.schedules })); return getClass(id); },
+    async updateClass(id, subject) { const saved = unwrap(await client.rpc('save_class', { p_id: id, p_name: subject.name, p_total_minutes: subject.totalMinutes, p_meeting_minutes: subject.meetingMinutes, p_prior_absences: subject.priorAbsences, p_schedules: subject.schedules })); return getClass(saved); },
     async deleteClass(id) { return (unwrap(await client.from('classes').delete().eq('user_id', userId).eq('id', id).select('id')) || []).length > 0; },
     async importClasses(subjects) { const ids = unwrap(await client.rpc('import_classes', { p_subjects: subjects })); if (!ids.length) return []; const rows = unwrap(await client.from('classes').select(classSelect).eq('user_id', userId).in('id', ids)); const byId = new Map(rows.map(row => [row.id, mapClass(row)])); return ids.map(id => byId.get(id)); },
     async getAbsences(id) { return unwrap(await client.from('absences').select('date').eq('user_id', userId).eq('class_id', id).order('date')).map(row => row.date); },

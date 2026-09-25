@@ -21,10 +21,10 @@ npm run lint
 npm run build
 ```
 
-## Supabase e beta privado
+## Supabase e cadastro
 
-1. Crie um projeto e execute `supabase/migrations/202608270001_multiuser.sql` no SQL Editor.
-2. Em Authentication, desative novos cadastros públicos e configure uma senha mínima de 10 caracteres.
+1. Crie um projeto e execute as migrations de `supabase/migrations/` no SQL Editor, em ordem.
+2. Em Authentication, habilite cadastro de novos usuários, desative confirmação de e-mail e configure senha mínima de 10 caracteres.
 3. Copie URL, chave publicável e chave secreta para `.env`. Nunca exponha a chave secreta no frontend.
 4. Crie a primeira conta:
 

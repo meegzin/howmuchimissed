@@ -8,16 +8,21 @@ function Privacy({ onClose }) {
 }
 
 function Login() {
-  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const [message, setMessage] = useState(''); const [privacy, setPrivacy] = useState(false);
+  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const [message, setMessage] = useState(''); const [privacy, setPrivacy] = useState(false); const [creating, setCreating] = useState(false);
   const submit = async event => {
     event.preventDefault(); setBusy(true); setMessage('');
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) setMessage('E-mail ou senha inválidos. Se você perdeu o acesso, fale com o administrador do beta.');
+    if (creating) {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) setMessage('Não foi possível criar a conta. Verifique o e-mail e use uma senha com pelo menos 10 caracteres.');
+      else setMessage('Conta criada. Você já pode começar seu planejamento.');
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setMessage('E-mail ou senha inválidos.');
+    }
     setBusy(false);
   };
-  return <main className="auth-page"><section className="auth-card"><div className="wordmark auth-wordmark"><b>25%</b><span>Planejador<br/>de Faltas</span></div><p className="eyebrow">Beta privado</p><h1>Entre no seu planejamento</h1><p>Use as credenciais enviadas pelo administrador.</p><form onSubmit={submit}><label>E-mail<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)}/></label><label>Senha<input type="password" autoComplete="current-password" required value={password} onChange={event => setPassword(event.target.value)}/></label>{message && <p className="form-error">{message}</p>}<button disabled={busy}>{busy ? 'Entrando…' : 'Entrar'}</button></form><button className="privacy-link" onClick={() => setPrivacy(true)}>Como seus dados são tratados</button></section>{privacy && <Privacy onClose={() => setPrivacy(false)}/>}</main>;
+  return <main className="auth-page"><section className="auth-card"><div className="wordmark auth-wordmark"><b>25%</b><span>Planejador<br/>de Faltas</span></div><p className="eyebrow">Planejador de faltas</p><h1>{creating ? 'Crie sua conta' : 'Entre no seu planejamento'}</h1><p>{creating ? 'Cadastre seu e-mail e crie uma senha para começar.' : 'Entre para continuar seu planejamento.'}</p><form onSubmit={submit}><label>E-mail<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)}/></label><label>Senha<input type="password" autoComplete={creating ? 'new-password' : 'current-password'} minLength={creating ? 10 : undefined} required value={password} onChange={event => setPassword(event.target.value)}/>{creating && <small>Use pelo menos 10 caracteres.</small>}</label>{message && <p className={message.startsWith('Conta criada') ? 'form-success' : 'form-error'}>{message}</p>}<button disabled={busy}>{busy ? 'Aguarde…' : creating ? 'Criar conta' : 'Entrar'}</button></form><button className="privacy-link" onClick={() => setCreating(!creating)}>{creating ? 'Já tem uma conta? Entrar' : 'Criar uma conta'}</button><button className="privacy-link" onClick={() => setPrivacy(true)}>Como seus dados são tratados</button></section>{privacy && <Privacy onClose={() => setPrivacy(false)}/>}</main>;
 }
-
 function ChangePassword({ session }) {
   const [currentPassword, setCurrentPassword] = useState(''); const [password, setPassword] = useState(''); const [confirmation, setConfirmation] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
   const submit = async event => {

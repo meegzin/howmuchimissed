@@ -137,3 +137,15 @@ test('health permanece disponivel sem banco e nao consome a cota da API', async 
   assert.equal(checks, 2);
   assert.equal((await fetch(base + '/api/classes')).status, 401);
 });
+
+test('guarda faltas anteriores no total sem criar datas de aula', async t => {
+  const { db, server, call } = await setup(); t.after(() => { server.close(); db.close(); });
+  const created = await call('/api/classes', { method: 'POST', body: JSON.stringify({ name: 'History', totalMinutes: 1200, meetingMinutes: 100, priorAbsences: 3, weekdays: [1], startTime: '08:00' }) });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.priorAbsences, 3);
+  assert.equal(created.data.absenceCount, 3);
+  assert.deepEqual(created.data.absences, []);
+  const edited = await call('/api/classes/' + created.data.id, { method: 'PATCH', body: JSON.stringify({ priorAbsences: 1 }) });
+  assert.equal(edited.data.absenceCount, 1);
+  assert.equal((await call('/api/classes', { method: 'POST', body: JSON.stringify({ name: 'Invalid', totalMinutes: 1200, meetingMinutes: 100, priorAbsences: -1, weekdays: [1], startTime: '08:00' }) })).status, 400);
+});

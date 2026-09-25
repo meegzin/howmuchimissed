@@ -3,6 +3,7 @@ const rowToClass = row => row && ({
   name: row.name,
   totalMinutes: row.total_minutes,
   meetingMinutes: row.meeting_minutes,
+  priorAbsences: row.prior_absences || 0,
   weekdays: JSON.parse(row.weekdays),
   startTime: row.start_time
 });
@@ -32,14 +33,14 @@ export function createSqliteRepository(db) {
     async getClass(id) { return getClass(id); },
     async createClass(subject) {
       const weekdays = [...new Set(subject.schedules.map(item => item.weekday))].sort();
-      const result = db.prepare('INSERT INTO classes (name,total_minutes,meeting_minutes,weekdays,start_time) VALUES (?,?,?,?,?)').run(subject.name, subject.totalMinutes, subject.meetingMinutes, JSON.stringify(weekdays), subject.schedules[0].startTime);
+      const result = db.prepare('INSERT INTO classes (name,total_minutes,meeting_minutes,weekdays,start_time,prior_absences) VALUES (?,?,?,?,?,?)').run(subject.name, subject.totalMinutes, subject.meetingMinutes, JSON.stringify(weekdays), subject.schedules[0].startTime, subject.priorAbsences ?? 0);
       const insert = db.prepare('INSERT INTO class_schedules (class_id,weekday,start_time) VALUES (?,?,?)');
       for (const item of subject.schedules) insert.run(result.lastInsertRowid, item.weekday, item.startTime);
       return getClass(result.lastInsertRowid);
     },
     async updateClass(id, subject) {
       const weekdays = [...new Set(subject.schedules.map(item => item.weekday))].sort();
-      db.prepare('UPDATE classes SET name=?,total_minutes=?,meeting_minutes=?,weekdays=?,start_time=? WHERE id=?').run(subject.name, subject.totalMinutes, subject.meetingMinutes, JSON.stringify(weekdays), subject.schedules[0].startTime, id);
+      db.prepare('UPDATE classes SET name=?,total_minutes=?,meeting_minutes=?,weekdays=?,start_time=?,prior_absences=? WHERE id=?').run(subject.name, subject.totalMinutes, subject.meetingMinutes, JSON.stringify(weekdays), subject.schedules[0].startTime, subject.priorAbsences ?? 0, id);
       db.prepare('DELETE FROM class_schedules WHERE class_id=?').run(id);
       const insert = db.prepare('INSERT INTO class_schedules (class_id,weekday,start_time) VALUES (?,?,?)');
       for (const item of subject.schedules) insert.run(id, item.weekday, item.startTime);
